@@ -1,105 +1,111 @@
-// Registers to each channel a map of instances where each instance has a set of callbacks
+// Registers to each topic a map of instances where each instance has a set of callbacks
 // All messages go through this
-const CHANNELCALLBACKMAP = new Map();
-const ONETIMECALLBACKSET = new Set();
+const TOPICMAP = new Map();
 // Saves a set of instances created with each factory
 const COMPONENTMAP = new Map();
 // Set of components per room
 const ROOMMAP = new Map();
-// Set of active channels per instance
+// Set of active topics per instance
 const LISTENINGMAP = new Map();
 // Component instance ID to the instance
 const IDMAP = new Map();
 // Each instance gets a unique id by increment
 let INSTANCEIDCOUNT = -1;
+// const ECHOMAP: Map<
+//     { room: string; topic: string; },
+//     { data: any, speaker: ComponentInstance, speechType: 'echo' }
+// > = new Map();
 // Allow access to an instance's internals from outside
 const ABILITYMAP = new Map();
-// Listen to a channel and fire a callback when receiving a message
-const LISTEN = (channel, callback, self) => {
-    const echoSet = ECHOMAP.get(channel);
-    const listenerCallbackMap = CHANNELCALLBACKMAP.get(channel);
+// Listen to a topic and fire a callback when receiving a message
+const LISTEN = (topic, callbackWithMetadata, self) => {
+    const listenerCallbackMap = TOPICMAP.get(topic);
     if (listenerCallbackMap) {
         const callbackObject = listenerCallbackMap.get(self);
         if (callbackObject) {
-            callbackObject.add(callback);
+            callbackObject.add(callbackWithMetadata);
         }
         else {
             const callbacks = new Set();
-            callbacks.add(callback);
+            callbacks.add(callbackWithMetadata);
             listenerCallbackMap.set(self, callbacks);
         }
     }
     else {
         const listenerCallbackMap = new Map();
         const callbacks = new Set();
-        callbacks.add(callback);
+        callbacks.add(callbackWithMetadata);
         listenerCallbackMap.set(self, callbacks);
-        CHANNELCALLBACKMAP.set(channel, listenerCallbackMap);
+        TOPICMAP.set(topic, listenerCallbackMap);
     }
+    // Trigger echo
+    // const latestEcho = ECHOMAP.get(topic);
+    // if (!latestEcho) return;
+    // if 
 };
-// Listen to a channel and fire the callback one time only
-const LISTENONCE = (channel, callback, self) => {
-    ONETIMECALLBACKSET.add(callback);
-    LISTEN(channel, callback, self);
-};
-// Stop listening to a channel
-const IGNORE = (channel, self) => {
-    CHANNELCALLBACKMAP.get(channel)?.delete(self);
-    LISTENINGMAP.get(self)?.delete(channel);
+// Stop listening to a topic
+const IGNORE = (topic, self) => {
+    TOPICMAP.get(topic)?.delete(self);
+    LISTENINGMAP.get(self)?.delete(topic);
 };
 // Ignore everything
 const DEAFEN = (self) => {
 };
-// Message the channel in every room
-const BROADCAST = (channel, data, speaker) => {
-    const listenerCallbackMap = CHANNELCALLBACKMAP.get(channel);
+// Message the topic in every room
+const BROADCAST = (topic, data, speaker) => {
+    const listenerCallbackMap = TOPICMAP.get(topic);
     if (!listenerCallbackMap)
         return;
     listenerCallbackMap.forEach(callbackSet => {
-        for (const callback of callbackSet) {
-            ONETIMECALLBACKSET.delete(callback);
-            callback(data, speaker, 'broadcast');
+        for (const item of callbackSet) {
+            if (item.maxTimes !== null && item.timesCalled >= item.maxTimes)
+                continue;
+            item.timesCalled++;
+            item.callback(data, speaker, 'broadcast');
         }
     });
 };
-// Message the channel in the room. Can't be heard in other rooms
-const SHOUT = (channel, data, speaker, room) => {
-    const listenerCallbackMap = CHANNELCALLBACKMAP.get(channel);
+// Message the topic in the room. Can't be heard in other rooms
+const SHOUT = (topic, data, speaker, room) => {
+    const listenerCallbackMap = TOPICMAP.get(topic);
     if (!listenerCallbackMap)
         return;
     for (const [listener, callbackSet] of listenerCallbackMap) {
         if (isInRoom(listener, room)) {
-            for (const callback of callbackSet) {
-                ONETIMECALLBACKSET.delete(callback);
-                callback(data, speaker, 'shout');
+            for (const item of callbackSet) {
+                if (item.maxTimes !== null && item.timesCalled >= item.maxTimes)
+                    continue;
+                item.timesCalled++;
+                item.callback(data, speaker, 'shout');
             }
         }
     }
     ;
 };
 // Message one specific target instance by reference. Can't be heard across rooms
-const WHISPER = (target, channel, data, speaker, room) => {
+const WHISPER = (target, topic, data, speaker, room) => {
     if (!isInRoom(target, room))
         return;
-    const callbackSet = CHANNELCALLBACKMAP.get(channel)?.get(target);
+    const callbackSet = TOPICMAP.get(topic)?.get(target);
     if (!callbackSet)
         return;
-    for (const callback of callbackSet) {
-        ONETIMECALLBACKSET.delete(callback);
-        callback(data, speaker, 'whisper');
+    for (const item of callbackSet) {
+        if (item.maxTimes !== null && item.timesCalled >= item.maxTimes)
+            continue;
+        item.timesCalled++;
+        item.callback(data, speaker, 'whisper');
     }
 };
-// Set a persistent message on a channel that can be picked up at any time.
+// Set a persistent message on a topic that can be picked up at any time.
 // This is different from other events in that it can be listened to after it is fired.
-// Echoing again on the same channel refires callbacks for all listeners.
+// Echoing again on the same topic refires callbacks for all listeners.
 // Can't be heard across rooms
-const ECHOMAP = new Map();
-const ECHO = (channel, data, speaker, room) => {
+const ECHO = (topic, data, speaker, room) => {
     // Could echo fire a whisper any time a new listener is added?
 };
-const checkForEchoes = (channel, callback, self) => {
+const checkForEchoes = (topic, callback, self) => {
     // Listen has to go here first
-    // const listenerCallbackMap = CHANNELCALLBACKMAP.get(channel);
+    // const listenerCallbackMap = topicCALLBACKMAP.get(topic);
     // if (!listenerCallbackMap) return;
     // for (const [listener, callbackSet] of listenerCallbackMap) {
     //     if (isInRoom(listener, room)) {
@@ -110,7 +116,9 @@ const checkForEchoes = (channel, callback, self) => {
     // };
 };
 const areInSameRoom = (componentInstance1, componentInstance2) => {
-    // Don't really need this, maybe a little easier
+    // Don't really need this
+    const room = getAbilities(componentInstance1)?.getRoom();
+    return !!room && room === getAbilities(componentInstance2)?.getRoom();
 };
 const isInRoom = (componentInstance, room) => {
     return ROOMMAP.get(room)?.has(componentInstance) ?? false;
@@ -132,8 +140,11 @@ const leaveRoom = (room, componentInstance) => {
     componentInstance.dataset.swRoom = '';
 };
 const defineComponent = (componentFn) => {
+    if (componentFn.constructor.name !== 'AsyncFunction') {
+        throw new Error(`Component definition must be async.`);
+    }
     const instanceSet = new Set();
-    const createInstance = async (room) => {
+    const createInstance = async (room = 'default') => {
         let isMounting = true;
         //let element: HTMLElement;
         INSTANCEIDCOUNT++;
@@ -159,10 +170,10 @@ const defineComponent = (componentFn) => {
         };
         // If we could make these accessible from outside that would be interesting
         const abilities = Object.freeze({
-            get id() {
+            getId() {
                 return instanceId;
             },
-            get room() {
+            getRoom() {
                 return room;
             },
             changeRoom(newRoom) {
@@ -176,50 +187,62 @@ const defineComponent = (componentFn) => {
                 // Currently not working
                 return LISTENINGMAP.get(element);
             },
-            whisper(target, channel, data) {
-                fire(WHISPER, target, channel, data);
+            whisper(target, topic, data) {
+                fire(WHISPER, target, topic, data);
             },
-            shout(channel, data) {
-                fire(SHOUT, channel, data);
+            shout(topic, data) {
+                fire(SHOUT, topic, data);
             },
-            broadcast(channel, data) {
-                fire(BROADCAST, channel, data);
+            broadcast(topic, data) {
+                fire(BROADCAST, topic, data);
             },
-            echo(channel, data) {
+            echo(topic, data) {
             },
-            listen(channel, callback) {
-                fire(LISTEN, channel, callback);
+            listen(topic, callback, numberOfTimes) {
+                const metadata = {
+                    callback,
+                    topic,
+                    timesCalled: 0,
+                    maxTimes: numberOfTimes || null
+                };
+                fire(LISTEN, topic, metadata);
             },
-            listenOnce(channel, callback) {
-                fire(LISTENONCE, channel, callback);
-            },
-            ignore(channel) {
-                fire(IGNORE, channel, element);
+            ignore(topic) {
+                fire(IGNORE, topic, element);
             },
             deafen() {
             },
             destroy() {
+                this.deafen();
                 // Delete from maps and null stuff out
             }
         });
         const element = await componentFn(abilities);
         if (!(element instanceof HTMLElement)) {
             rejectElement();
-            throw new Error(`Component definition must be async and must return an HTMLElement.`);
+            throw new Error(`Component definition must return an HTMLElement.`);
         }
-        IDMAP.set(instanceId, element);
         instanceSet.add(element);
         element.dataset.swId = String(instanceId);
-        enterRoom(room, element);
+        IDMAP.set(instanceId, element);
         LISTENINGMAP.set(element, new Set());
         ABILITYMAP.set(element, abilities);
-        // Check for echoes here?
+        enterRoom(room, element);
         resolveElement(element);
         isMounting = false;
         return element;
     };
     COMPONENTMAP.set(createInstance, instanceSet);
     return createInstance;
+};
+const getAbilities = (componentInstance) => {
+    // Retrieve the internals for an instance.
+    // This is interesting because it allows outside access to instance id, room, methods, etc.,
+    // while still allowing us to use plain unmodified HTMLElements directly, without wrapping them in objects
+    // Opens up the possibility of an impersonate() ability,
+    // where components fire other components' abilties but leave some audit trail
+    // Although this leads to some insane complexity and breaks encapsulation
+    return ABILITYMAP.get(componentInstance);
 };
 const sw = Object.freeze({
     defineComponent: defineComponent,
@@ -236,23 +259,17 @@ const sw = Object.freeze({
     getInstanceById(id) {
         return IDMAP.get(id);
     },
-    findInstances(channel, room) {
+    findInstances(topic, room) {
         // Allow searching by stuff
     },
-    getAbilities(componentInstance) {
-        // Retrieve the internals for an instance.
-        // This is interesting because it allows outside access to instance id, room, methods, etc.,
-        // while still allowing us to use plain unmodified HTMLElements directly, without wrapping them in objects
-        return ABILITYMAP.get(componentInstance);
+    get topics() {
+        return [...TOPICMAP.keys()];
     },
-    get channels() {
-        return [...CHANNELCALLBACKMAP.keys()];
+    deleteTopic(topic) {
+        TOPICMAP.delete(topic);
     },
-    deleteChannel(channel) {
-        CHANNELCALLBACKMAP.delete(channel);
-    },
-    hasChannel(channel) {
-        return CHANNELCALLBACKMAP.has(channel);
+    hasTopic(topic) {
+        return TOPICMAP.has(topic);
     },
 });
 export default sw;

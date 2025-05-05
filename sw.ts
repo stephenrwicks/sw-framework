@@ -1,101 +1,102 @@
 type ComponentDefinition = (abilities: Abilities) => Promise<HTMLElement>;
-type Component = (room: string) => Promise<ComponentInstance>;
+type Component = (room?: string) => Promise<ComponentInstance>;
 type ComponentInstance = HTMLElement;
 type MessageCallback = (data: any, speaker: ComponentInstance, speechType: SpeechType) => any;
-
-type ListenerCallbackMap = Map<ComponentInstance, Set<MessageCallback>>;
+type MessageCallbackWithMetadata = {
+    callback: MessageCallback;
+    topic: string; // Unused at the moment
+    timesCalled: number;
+    maxTimes: number | null;
+}
+type ListenerCallbackMap = Map<ComponentInstance, Set<MessageCallbackWithMetadata>>;
 
 
 // Objects I might want to switch to later:
 
-type ComponentInstanceWithMetadata = {
-    instance: ComponentInstance;
-    channelCallbacks: Map<string, Set<MessageCallback>>;
-    readonly id: number;
-    readonly room: string;
-}
-
-type MessageCallbackWithMetadata = {
-    messageCallback: MessageCallback;
-    times?: number;   
-}
+// type ComponentInstanceWithMetadata = {
+//     instance: ComponentInstance;
+//     topicCallbacks: Map<string, Set<MessageCallback>>;
+//     readonly id: number;
+//     readonly room: string;
+// }
 
 
 type Abilities = Readonly<{
-    readonly id: number;
-    readonly room: string;
+    getId(): number;
+    getRoom(): string;
     changeRoom(newRoom: string): void;
-    whisper(target: ComponentInstance, channel: string, data: any): void;
-    shout(channel: string, data: any): void;
-    broadcast(channel: string, data: any): void;
-    echo(channel: string, data: any): void;
-    listen(channel: string, callback: MessageCallback): void;
-    ignore(channel: string): void;
+    listen(topic: string, callback: MessageCallback, numberOfTimes?: number): void;
+    ignore(topic: string): void;
     deafen(): void;
+    whisper(target: ComponentInstance, topic: string, data: any): void;
+    shout(topic: string, data: any): void;
+    broadcast(topic: string, data: any): void;
+    echo(topic: string, data: any): void;
     destroy(): void;
+    //impersonate(): Abilities;
+    //track(component: ComponentInstance): void;
 }>;
 
 type SpeechType = 'whisper' | 'shout' | 'broadcast' | 'echo';
 
 export { ComponentDefinition, Component, ComponentInstance };
 
-// Registers to each channel a map of instances where each instance has a set of callbacks
+// Registers to each topic a map of instances where each instance has a set of callbacks
 // All messages go through this
-const CHANNELCALLBACKMAP: Map<string, ListenerCallbackMap> = new Map();
-
-const ONETIMECALLBACKSET: Set<MessageCallback> = new Set();
-
+const TOPICMAP: Map<string, ListenerCallbackMap> = new Map();
 // Saves a set of instances created with each factory
 const COMPONENTMAP: Map<Component, Set<ComponentInstance>> = new Map();
 // Set of components per room
 const ROOMMAP: Map<string, Set<ComponentInstance>> = new Map();
-// Set of active channels per instance
+// Set of active topics per instance
 const LISTENINGMAP: Map<ComponentInstance, Set<string>> = new Map();
 // Component instance ID to the instance
 const IDMAP: Map<number, ComponentInstance> = new Map();
 // Each instance gets a unique id by increment
 let INSTANCEIDCOUNT = -1;
 
+// const ECHOMAP: Map<
+//     { room: string; topic: string; },
+//     { data: any, speaker: ComponentInstance, speechType: 'echo' }
+// > = new Map();
+
 // Allow access to an instance's internals from outside
 const ABILITYMAP: Map<ComponentInstance, Abilities> = new Map();
 
-// Listen to a channel and fire a callback when receiving a message
-const LISTEN = (channel: string, callback: MessageCallback, self: ComponentInstance) => {
+// Listen to a topic and fire a callback when receiving a message
+const LISTEN = (topic: string, callbackWithMetadata: MessageCallbackWithMetadata, self: ComponentInstance) => {
 
-    const echoSet = ECHOMAP.get(channel);
-
-
-    const listenerCallbackMap = CHANNELCALLBACKMAP.get(channel);
+    const listenerCallbackMap = TOPICMAP.get(topic);
     if (listenerCallbackMap) {
         const callbackObject = listenerCallbackMap.get(self);
         if (callbackObject) {
-            callbackObject.add(callback);
+            callbackObject.add(callbackWithMetadata);
         }
         else {
-            const callbacks = new Set<MessageCallback>();
-            callbacks.add(callback);
+            const callbacks = new Set<MessageCallbackWithMetadata>();
+            callbacks.add(callbackWithMetadata);
             listenerCallbackMap.set(self, callbacks);
         }
     }
     else {
         const listenerCallbackMap: ListenerCallbackMap = new Map();
-        const callbacks = new Set<MessageCallback>();
-        callbacks.add(callback);
+        const callbacks = new Set<MessageCallbackWithMetadata>();
+        callbacks.add(callbackWithMetadata);
         listenerCallbackMap.set(self, callbacks);
-        CHANNELCALLBACKMAP.set(channel, listenerCallbackMap);
+        TOPICMAP.set(topic, listenerCallbackMap);
     }
+
+    // Trigger echo
+    // const latestEcho = ECHOMAP.get(topic);
+    // if (!latestEcho) return;
+    // if 
+
 };
 
-// Listen to a channel and fire the callback one time only
-const LISTENONCE = (channel: string, callback: MessageCallback, self: ComponentInstance) => {
-    ONETIMECALLBACKSET.add(callback);
-    LISTEN(channel, callback, self);
-};
-
-// Stop listening to a channel
-const IGNORE = (channel: string, self: ComponentInstance) => {
-    CHANNELCALLBACKMAP.get(channel)?.delete(self);
-    LISTENINGMAP.get(self)?.delete(channel);
+// Stop listening to a topic
+const IGNORE = (topic: string, self: ComponentInstance) => {
+    TOPICMAP.get(topic)?.delete(self);
+    LISTENINGMAP.get(self)?.delete(topic);
 };
 
 // Ignore everything
@@ -103,56 +104,58 @@ const DEAFEN = (self: ComponentInstance) => {
 
 };
 
-
-// Message the channel in every room
-const BROADCAST = (channel: string, data: any, speaker: ComponentInstance) => {
-    const listenerCallbackMap = CHANNELCALLBACKMAP.get(channel);
+// Message the topic in every room
+const BROADCAST = (topic: string, data: any, speaker: ComponentInstance) => {
+    const listenerCallbackMap = TOPICMAP.get(topic);
     if (!listenerCallbackMap) return;
     listenerCallbackMap.forEach(callbackSet => {
-        for (const callback of callbackSet) {
-            ONETIMECALLBACKSET.delete(callback);
-            callback(data, speaker, 'broadcast');
+        for (const item of callbackSet) {
+            if (item.maxTimes !== null && item.timesCalled >= item.maxTimes) continue;
+            item.timesCalled++;
+            item.callback(data, speaker, 'broadcast');
         }
     });
 };
 
-// Message the channel in the room. Can't be heard in other rooms
-const SHOUT = (channel: string, data: any, speaker: ComponentInstance, room: string) => {
-    const listenerCallbackMap = CHANNELCALLBACKMAP.get(channel);
+// Message the topic in the room. Can't be heard in other rooms
+const SHOUT = (topic: string, data: any, speaker: ComponentInstance, room: string) => {
+    const listenerCallbackMap = TOPICMAP.get(topic);
     if (!listenerCallbackMap) return;
     for (const [listener, callbackSet] of listenerCallbackMap) {
         if (isInRoom(listener, room)) {
-            for (const callback of callbackSet) {
-                ONETIMECALLBACKSET.delete(callback);
-                callback(data, speaker, 'shout');
+            for (const item of callbackSet) {
+                if (item.maxTimes !== null && item.timesCalled >= item.maxTimes) continue;
+                item.timesCalled++;
+                item.callback(data, speaker, 'shout');
             }
         }
     };
 };
 
 // Message one specific target instance by reference. Can't be heard across rooms
-const WHISPER = (target: ComponentInstance, channel: string, data: any, speaker: ComponentInstance, room: string) => {
+const WHISPER = (target: ComponentInstance, topic: string, data: any, speaker: ComponentInstance, room: string) => {
     if (!isInRoom(target, room)) return;
-    const callbackSet = CHANNELCALLBACKMAP.get(channel)?.get(target);
+    const callbackSet = TOPICMAP.get(topic)?.get(target);
     if (!callbackSet) return;
-    for (const callback of callbackSet) {
-        ONETIMECALLBACKSET.delete(callback);
-        callback(data, speaker, 'whisper');
+    for (const item of callbackSet) {
+        if (item.maxTimes !== null && item.timesCalled >= item.maxTimes) continue;
+        item.timesCalled++;
+        item.callback(data, speaker, 'whisper');
     }
 };
 
-// Set a persistent message on a channel that can be picked up at any time.
+// Set a persistent message on a topic that can be picked up at any time.
 // This is different from other events in that it can be listened to after it is fired.
-// Echoing again on the same channel refires callbacks for all listeners.
+// Echoing again on the same topic refires callbacks for all listeners.
 // Can't be heard across rooms
-const ECHOMAP: Map<string, MessageCallback> = new Map();
-const ECHO = (channel: string, data: any, speaker: ComponentInstance, room: string) => {
+
+const ECHO = (topic: string, data: any, speaker: ComponentInstance, room: string) => {
     // Could echo fire a whisper any time a new listener is added?
 };
 
-const checkForEchoes = (channel: string, callback: (data: any, speaker: ComponentInstance, speechType: SpeechType) => any, self: ComponentInstance) => {
+const checkForEchoes = (topic: string, callback: (data: any, speaker: ComponentInstance, speechType: SpeechType) => any, self: ComponentInstance) => {
     // Listen has to go here first
-    // const listenerCallbackMap = CHANNELCALLBACKMAP.get(channel);
+    // const listenerCallbackMap = topicCALLBACKMAP.get(topic);
     // if (!listenerCallbackMap) return;
     // for (const [listener, callbackSet] of listenerCallbackMap) {
     //     if (isInRoom(listener, room)) {
@@ -164,7 +167,9 @@ const checkForEchoes = (channel: string, callback: (data: any, speaker: Componen
 };
 
 const areInSameRoom = (componentInstance1: ComponentInstance, componentInstance2: ComponentInstance) => {
-    // Don't really need this, maybe a little easier
+    // Don't really need this
+    const room = getAbilities(componentInstance1)?.getRoom();
+    return !!room && room === getAbilities(componentInstance2)?.getRoom();
 };
 
 const isInRoom = (componentInstance: ComponentInstance, room: string) => {
@@ -190,8 +195,11 @@ const leaveRoom = (room: string, componentInstance: ComponentInstance) => {
 };
 
 const defineComponent = (componentFn: ComponentDefinition) => {
+    if (componentFn.constructor.name !== 'AsyncFunction') {
+        throw new Error(`Component definition must be async.`);
+    }
     const instanceSet = new Set<ComponentInstance>();
-    const createInstance: Component = async (room: string) => {
+    const createInstance: Component = async (room: string = 'default') => {
         let isMounting = true;
         //let element: HTMLElement;
         INSTANCEIDCOUNT++;
@@ -224,10 +232,10 @@ const defineComponent = (componentFn: ComponentDefinition) => {
 
         // If we could make these accessible from outside that would be interesting
         const abilities: Abilities = Object.freeze({
-            get id() {
+            getId() {
                 return instanceId;
             },
-            get room() {
+            getRoom() {
                 return room;
             },
             changeRoom(newRoom: string) {
@@ -241,51 +249,52 @@ const defineComponent = (componentFn: ComponentDefinition) => {
                 // Currently not working
                 return LISTENINGMAP.get(element) as Set<string>;
             },
-            whisper(target: ComponentInstance, channel: string, data: any) {
-                fire(WHISPER, target, channel, data);
+            whisper(target: ComponentInstance, topic: string, data: any) {
+                fire(WHISPER, target, topic, data);
             },
-            shout(channel: string, data: any) {
-                fire(SHOUT, channel, data);
+            shout(topic: string, data: any) {
+                fire(SHOUT, topic, data);
             },
-            broadcast(channel: string, data: any) {
-                fire(BROADCAST, channel, data);
+            broadcast(topic: string, data: any) {
+                fire(BROADCAST, topic, data);
             },
-            echo(channel: string, data: any) {
+            echo(topic: string, data: any) {
 
             },
-            listen(channel: string, callback: MessageCallback) {
-                fire(LISTEN, channel, callback);
+            listen(topic: string, callback: MessageCallback, numberOfTimes?: number) {
+                const metadata: MessageCallbackWithMetadata = {
+                    callback,
+                    topic,
+                    timesCalled: 0,
+                    maxTimes: numberOfTimes || null
+                };
+                fire(LISTEN, topic, metadata);
             },
-            listenOnce(channel: string, callback: MessageCallback) {
-                fire(LISTENONCE, channel, callback);
-            },
-            ignore(channel: string) {
-                fire(IGNORE, channel, element);
+            ignore(topic: string) {
+                fire(IGNORE, topic, element);
             },
             deafen() {
 
             },
             destroy() {
+                this.deafen();
                 // Delete from maps and null stuff out
             }
         });
+
         const element = await componentFn(abilities);
         if (!(element instanceof HTMLElement)) {
             rejectElement();
-            throw new Error(`Component definition must be async and must return an HTMLElement.`);
+            throw new Error(`Component definition must return an HTMLElement.`);
         }
 
-        IDMAP.set(instanceId, element);
+
         instanceSet.add(element);
         element.dataset.swId = String(instanceId);
-
-        enterRoom(room, element);
-
+        IDMAP.set(instanceId, element);
         LISTENINGMAP.set(element, new Set());
-
         ABILITYMAP.set(element, abilities);
-
-        // Check for echoes here?
+        enterRoom(room, element);
 
         resolveElement(element);
 
@@ -294,6 +303,16 @@ const defineComponent = (componentFn: ComponentDefinition) => {
     };
     COMPONENTMAP.set(createInstance, instanceSet);
     return createInstance;
+};
+
+const getAbilities = (componentInstance: ComponentInstance) => {
+    // Retrieve the internals for an instance.
+    // This is interesting because it allows outside access to instance id, room, methods, etc.,
+    // while still allowing us to use plain unmodified HTMLElements directly, without wrapping them in objects
+    // Opens up the possibility of an impersonate() ability,
+    // where components fire other components' abilties but leave some audit trail
+    // Although this leads to some insane complexity and breaks encapsulation
+    return ABILITYMAP.get(componentInstance);
 };
 
 const sw = Object.freeze({
@@ -311,23 +330,17 @@ const sw = Object.freeze({
     getInstanceById(id: number): ComponentInstance | undefined {
         return IDMAP.get(id);
     },
-    findInstances(channel: string, room: string) {
+    findInstances(topic: string, room: string) {
         // Allow searching by stuff
     },
-    getAbilities(componentInstance: ComponentInstance): Abilities | undefined {
-        // Retrieve the internals for an instance.
-        // This is interesting because it allows outside access to instance id, room, methods, etc.,
-        // while still allowing us to use plain unmodified HTMLElements directly, without wrapping them in objects
-        return ABILITYMAP.get(componentInstance);
+    get topics(): string[] {
+        return [...TOPICMAP.keys()];
     },
-    get channels(): string[] {
-        return [...CHANNELCALLBACKMAP.keys()];
+    deleteTopic(topic: string): void {
+        TOPICMAP.delete(topic);
     },
-    deleteChannel(channel: string): void {
-        CHANNELCALLBACKMAP.delete(channel);
-    },
-    hasChannel(channel: string): boolean {
-        return CHANNELCALLBACKMAP.has(channel);
+    hasTopic(topic: string): boolean {
+        return TOPICMAP.has(topic);
     },
 });
 
