@@ -1,5 +1,5 @@
-type ComponentDefinition = (abilities: Abilities) => Promise<HTMLElement>;
-type Component = (room?: string) => Promise<ComponentInstance>;
+type ComponentDefinition = (abilities: Abilities, props?: Record<string, any>) => Promise<HTMLElement>;
+type Component = (props?: Record<string, any>) => Promise<ComponentInstance>;
 type ComponentInstance = HTMLElement;
 type MessageCallback = (data: any, speaker: ComponentInstance, speechType: SpeechType) => any;
 type MessageCallbackWithMetadata = {
@@ -10,21 +10,20 @@ type MessageCallbackWithMetadata = {
 }
 type ListenerCallbackMap = Map<ComponentInstance, Set<MessageCallbackWithMetadata>>;
 
+type ComponentInstanceWithMetadata = {
+    element: ComponentInstance;
+    // topicCallbacks: Map<string, Set<MessageCallback>>;
+    readonly id: number;
+    readonly room: string;
+}
 
-// Objects I might want to switch to later:
 
-// type ComponentInstanceWithMetadata = {
-//     instance: ComponentInstance;
-//     topicCallbacks: Map<string, Set<MessageCallback>>;
-//     readonly id: number;
-//     readonly room: string;
-// }
-
+// Possibly introduce sw.Controller that is a separate type of component without a dom representation, that can fire internals on behalf of anything
 
 type Abilities = Readonly<{
     getId(): number;
-    getRoom(): string;
-    changeRoom(newRoom: string): void;
+    getRoom(): { name: string; roommates: ComponentInstance[] };
+    setRoom(newRoom: string): void;
     listen(topic: string, callback: MessageCallback, numberOfTimes?: number): void;
     ignore(topic: string): void;
     deafen(): void;
@@ -45,7 +44,10 @@ export { ComponentDefinition, Component, ComponentInstance };
 // All messages go through this
 const TOPICMAP: Map<string, ListenerCallbackMap> = new Map();
 // Saves a set of instances created with each factory
-const COMPONENTMAP: Map<Component, Set<ComponentInstance>> = new Map();
+const INSTANCES: Record<string, ComponentInstanceWithMetadata[]> = {};
+// Store the metadata
+
+const COMPONENTS: Record<string, Component> = {};
 // Set of components per room
 const ROOMMAP: Map<string, Set<ComponentInstance>> = new Map();
 // Set of active topics per instance
@@ -53,7 +55,7 @@ const LISTENINGMAP: Map<ComponentInstance, Set<string>> = new Map();
 // Component instance ID to the instance
 const IDMAP: Map<number, ComponentInstance> = new Map();
 // Each instance gets a unique id by increment
-let INSTANCEIDCOUNT = -1;
+let INSTANCEIDCOUNT = 0;
 
 // const ECHOMAP: Map<
 //     { room: string; topic: string; },
@@ -168,8 +170,8 @@ const checkForEchoes = (topic: string, callback: (data: any, speaker: ComponentI
 
 const areInSameRoom = (componentInstance1: ComponentInstance, componentInstance2: ComponentInstance) => {
     // Don't really need this
-    const room = getAbilities(componentInstance1)?.getRoom();
-    return !!room && room === getAbilities(componentInstance2)?.getRoom();
+    const room = getAbilities(componentInstance1)?.getRoom().name;
+    return !!room && room === getAbilities(componentInstance2)?.getRoom().name;
 };
 
 const isInRoom = (componentInstance: ComponentInstance, room: string) => {
@@ -194,16 +196,17 @@ const leaveRoom = (room: string, componentInstance: ComponentInstance) => {
     componentInstance.dataset.swRoom = '';
 };
 
-const defineComponent = (componentFn: ComponentDefinition) => {
+const define = (componentFn: ComponentDefinition) => {
+    if (typeof componentFn !== 'function' || !componentFn.name) {
+        throw new Error(`Component definition must use a named function: async function ComponentName()`);
+    }
     if (componentFn.constructor.name !== 'AsyncFunction') {
         throw new Error(`Component definition must be async.`);
     }
-    const instanceSet = new Set<ComponentInstance>();
-    const createInstance: Component = async (room: string = 'default') => {
+    const build: Component = async (props?: Record<string, any>) => {
         let isMounting = true;
-        //let element: HTMLElement;
-        INSTANCEIDCOUNT++;
-        const instanceId = INSTANCEIDCOUNT;
+        const instanceId = INSTANCEIDCOUNT++;
+        let room = '';
 
         // We are using a Promise to resolve a circular dependency.
         // In order for the methods like listen() to work, they need the component instance to finish firing and return its value, element.
@@ -236,10 +239,13 @@ const defineComponent = (componentFn: ComponentDefinition) => {
                 return instanceId;
             },
             getRoom() {
-                return room;
+                return {
+                    name: room,
+                    roommates: [...ROOMMAP.get(room) ?? []]
+                }
             },
-            changeRoom(newRoom: string) {
-                fire(leaveRoom, room)
+            setRoom(newRoom: string) {
+                fire(leaveRoom, room);
                 room = newRoom;
                 fire(enterRoom, room);
             },
@@ -282,14 +288,23 @@ const defineComponent = (componentFn: ComponentDefinition) => {
             }
         });
 
-        const element = await componentFn(abilities);
+        const element = await componentFn(abilities, props);
         if (!(element instanceof HTMLElement)) {
             rejectElement();
             throw new Error(`Component definition must return an HTMLElement.`);
         }
 
+        const metadata: ComponentInstanceWithMetadata = {
+            element,
+            get room() {
+                return room;
+            },
+            get id() {
+                return instanceId;
+            }
+        };
 
-        instanceSet.add(element);
+        INSTANCES[componentFn.name]?.push(metadata);
         element.dataset.swId = String(instanceId);
         IDMAP.set(instanceId, element);
         LISTENINGMAP.set(element, new Set());
@@ -301,9 +316,11 @@ const defineComponent = (componentFn: ComponentDefinition) => {
         isMounting = false;
         return element;
     };
-    COMPONENTMAP.set(createInstance, instanceSet);
-    return createInstance;
-};
+
+    INSTANCES[componentFn.name] = [];
+    COMPONENTS[componentFn.name] = build;
+
+}
 
 const getAbilities = (componentInstance: ComponentInstance) => {
     // Retrieve the internals for an instance.
@@ -315,33 +332,49 @@ const getAbilities = (componentInstance: ComponentInstance) => {
     return ABILITYMAP.get(componentInstance);
 };
 
+const getInstancesByRoom = (room: string) => {
+    const x: any = {};
+    for (const key in INSTANCES) {
+        const instances = INSTANCES[key].filter(item => item.room === room);
+        if (instances.length) {
+            x[key] = instances;
+        }
+    }
+    return x;
+};
+
+
+
 const sw = Object.freeze({
-    defineComponent: defineComponent,
-    get components(): Component[] {
-        // Doesn't really make sense right now because we aren't storing the name,
-        // so everything is called createInstance
-        // Anonymous function makes name storing basically impossible
-        return [...COMPONENTMAP.keys()];
+    components() {
+        return {...COMPONENTS};
     },
-    getInstances(componentFn: Component): Set<ComponentInstance> | undefined {
-        // Retrieve a set of instances by component function reference
-        return COMPONENTMAP.get(componentFn);
+    define,
+    build(componentName: string, props?: Record<string, any>) {
+        if (typeof COMPONENTS[componentName] !== 'function') throw new Error(`Component "${componentName}" isn't defined.`);
+        return COMPONENTS[componentName](props);
     },
-    getInstanceById(id: number): ComponentInstance | undefined {
-        return IDMAP.get(id);
+    find(query: { component: string, room: string }) {
+        if (!query) return;
+        if (typeof query.component === 'undefined' && typeof query.room === 'undefined') return;
+        if (typeof query.room === 'undefined') return INSTANCES[query.component];
+        if (typeof query.component === 'undefined') {
+            return getInstancesByRoom(query.room);
+        }
+        // Return by both here
     },
-    findInstances(topic: string, room: string) {
-        // Allow searching by stuff
-    },
-    get topics(): string[] {
-        return [...TOPICMAP.keys()];
-    },
-    deleteTopic(topic: string): void {
-        TOPICMAP.delete(topic);
-    },
-    hasTopic(topic: string): boolean {
-        return TOPICMAP.has(topic);
-    },
+    // getInstanceById(id: number): ComponentInstance | undefined {
+    //     return IDMAP.get(id);
+    // },
+    // getTopics(): string[] {
+    //     return [...TOPICMAP.keys()];
+    // },
+    // deleteTopic(topic: string): void {
+    //     TOPICMAP.delete(topic);
+    // },
+    // topicExists(topic: string): boolean {
+    //     return TOPICMAP.has(topic);
+    // },
 });
 
 export default sw;

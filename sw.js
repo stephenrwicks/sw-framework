@@ -2,7 +2,9 @@
 // All messages go through this
 const TOPICMAP = new Map();
 // Saves a set of instances created with each factory
-const COMPONENTMAP = new Map();
+const INSTANCES = {};
+// Store the metadata
+const COMPONENTS = {};
 // Set of components per room
 const ROOMMAP = new Map();
 // Set of active topics per instance
@@ -10,7 +12,7 @@ const LISTENINGMAP = new Map();
 // Component instance ID to the instance
 const IDMAP = new Map();
 // Each instance gets a unique id by increment
-let INSTANCEIDCOUNT = -1;
+let INSTANCEIDCOUNT = 0;
 // const ECHOMAP: Map<
 //     { room: string; topic: string; },
 //     { data: any, speaker: ComponentInstance, speechType: 'echo' }
@@ -117,8 +119,8 @@ const checkForEchoes = (topic, callback, self) => {
 };
 const areInSameRoom = (componentInstance1, componentInstance2) => {
     // Don't really need this
-    const room = getAbilities(componentInstance1)?.getRoom();
-    return !!room && room === getAbilities(componentInstance2)?.getRoom();
+    const room = getAbilities(componentInstance1)?.getRoom().name;
+    return !!room && room === getAbilities(componentInstance2)?.getRoom().name;
 };
 const isInRoom = (componentInstance, room) => {
     return ROOMMAP.get(room)?.has(componentInstance) ?? false;
@@ -139,16 +141,17 @@ const leaveRoom = (room, componentInstance) => {
     ROOMMAP.get(room)?.delete(componentInstance);
     componentInstance.dataset.swRoom = '';
 };
-const defineComponent = (componentFn) => {
+const define = (componentFn) => {
+    if (typeof componentFn !== 'function' || !componentFn.name) {
+        throw new Error(`Component definition must use a named function: async function ComponentName()`);
+    }
     if (componentFn.constructor.name !== 'AsyncFunction') {
         throw new Error(`Component definition must be async.`);
     }
-    const instanceSet = new Set();
-    const createInstance = async (room = 'default') => {
+    const build = async (props) => {
         let isMounting = true;
-        //let element: HTMLElement;
-        INSTANCEIDCOUNT++;
-        const instanceId = INSTANCEIDCOUNT;
+        const instanceId = INSTANCEIDCOUNT++;
+        let room = '';
         // We are using a Promise to resolve a circular dependency.
         // In order for the methods like listen() to work, they need the component instance to finish firing and return its value, element.
         // But the methods are available inside the component instance and can be fired immediately, and need to pass in element for them to work.
@@ -174,9 +177,12 @@ const defineComponent = (componentFn) => {
                 return instanceId;
             },
             getRoom() {
-                return room;
+                return {
+                    name: room,
+                    roommates: [...ROOMMAP.get(room) ?? []]
+                };
             },
-            changeRoom(newRoom) {
+            setRoom(newRoom) {
                 fire(leaveRoom, room);
                 room = newRoom;
                 fire(enterRoom, room);
@@ -217,12 +223,21 @@ const defineComponent = (componentFn) => {
                 // Delete from maps and null stuff out
             }
         });
-        const element = await componentFn(abilities);
+        const element = await componentFn(abilities, props);
         if (!(element instanceof HTMLElement)) {
             rejectElement();
             throw new Error(`Component definition must return an HTMLElement.`);
         }
-        instanceSet.add(element);
+        const metadata = {
+            element,
+            get room() {
+                return room;
+            },
+            get id() {
+                return instanceId;
+            }
+        };
+        INSTANCES[componentFn.name]?.push(metadata);
         element.dataset.swId = String(instanceId);
         IDMAP.set(instanceId, element);
         LISTENINGMAP.set(element, new Set());
@@ -232,8 +247,8 @@ const defineComponent = (componentFn) => {
         isMounting = false;
         return element;
     };
-    COMPONENTMAP.set(createInstance, instanceSet);
-    return createInstance;
+    INSTANCES[componentFn.name] = [];
+    COMPONENTS[componentFn.name] = build;
 };
 const getAbilities = (componentInstance) => {
     // Retrieve the internals for an instance.
@@ -244,32 +259,49 @@ const getAbilities = (componentInstance) => {
     // Although this leads to some insane complexity and breaks encapsulation
     return ABILITYMAP.get(componentInstance);
 };
+const getInstancesByRoom = (room) => {
+    const x = {};
+    for (const key in INSTANCES) {
+        const instances = INSTANCES[key].filter(item => item.room === room);
+        if (instances.length) {
+            x[key] = instances;
+        }
+    }
+    return x;
+};
 const sw = Object.freeze({
-    defineComponent: defineComponent,
-    get components() {
-        // Doesn't really make sense right now because we aren't storing the name,
-        // so everything is called createInstance
-        // Anonymous function makes name storing basically impossible
-        return [...COMPONENTMAP.keys()];
+    components() {
+        return { ...COMPONENTS };
     },
-    getInstances(componentFn) {
-        // Retrieve a set of instances by component function reference
-        return COMPONENTMAP.get(componentFn);
+    define,
+    build(componentName, props) {
+        if (typeof COMPONENTS[componentName] !== 'function')
+            throw new Error(`Component "${componentName}" isn't defined.`);
+        return COMPONENTS[componentName](props);
     },
-    getInstanceById(id) {
-        return IDMAP.get(id);
+    find(query) {
+        if (!query)
+            return;
+        if (typeof query.component === 'undefined' && typeof query.room === 'undefined')
+            return;
+        if (typeof query.room === 'undefined')
+            return INSTANCES[query.component];
+        if (typeof query.component === 'undefined') {
+            return getInstancesByRoom(query.room);
+        }
+        // Return by both here
     },
-    findInstances(topic, room) {
-        // Allow searching by stuff
-    },
-    get topics() {
-        return [...TOPICMAP.keys()];
-    },
-    deleteTopic(topic) {
-        TOPICMAP.delete(topic);
-    },
-    hasTopic(topic) {
-        return TOPICMAP.has(topic);
-    },
+    // getInstanceById(id: number): ComponentInstance | undefined {
+    //     return IDMAP.get(id);
+    // },
+    // getTopics(): string[] {
+    //     return [...TOPICMAP.keys()];
+    // },
+    // deleteTopic(topic: string): void {
+    //     TOPICMAP.delete(topic);
+    // },
+    // topicExists(topic: string): boolean {
+    //     return TOPICMAP.has(topic);
+    // },
 });
 export default sw;

@@ -1,26 +1,26 @@
 import sw from './sw.js';
-const { defineComponent } = sw;
-const App = defineComponent(async ({ listen, whisper, broadcast }) => {
+const { define, build } = sw;
+define(async function App({ listen, whisper, broadcast }) {
     const main = document.createElement('main');
-    const sidebar = await Sidebar();
+    const sidebar = await build('Sidebar');
     const conversations = [
         'Grace',
         'Lenore',
         'Stephen'
     ];
     for (const person of conversations) {
-        const button = await SidebarButton();
+        const button = await build('SidebarButton');
         whisper(button, 'setSidebarButtonId', person);
         whisper(sidebar, 'addConversationToSidebar', button);
     }
-    const chatscreen = await ChatScreen();
-    const textbox = await Textbox();
+    const chatscreen = await build('ChatScreen');
+    const textbox = await build('Textbox');
     listen('setActiveConversation', (conversation) => {
     });
     main.append(sidebar, chatscreen, textbox);
     return main;
 });
-const ChatScreen = defineComponent(async ({ listen }) => {
+define(async function ChatScreen({ listen }) {
     const div = document.createElement('div');
     div.className = 'chat-screen';
     const messages = [];
@@ -33,14 +33,12 @@ const ChatScreen = defineComponent(async ({ listen }) => {
     });
     return div;
 });
-const Message = defineComponent(async ({ listen, ignore }) => {
+define(async function Message({ whisper }, props) {
     const p = document.createElement('p');
-    listen('addTextToMessage', (message) => {
-        p.textContent = message;
-    }, 1);
+    p.textContent = props?.text;
     return p;
 });
-const Textbox = defineComponent(async ({ whisper, broadcast }) => {
+define(async function Textbox({ whisper, broadcast }) {
     const div = document.createElement('div');
     div.className = 'textbox-wrapper';
     const input = document.createElement('input');
@@ -48,8 +46,7 @@ const Textbox = defineComponent(async ({ whisper, broadcast }) => {
     const handleSend = async () => {
         if (!input.value.trim())
             return;
-        const newMsg = await Message('default');
-        whisper(newMsg, 'addTextToMessage', input.value.trim());
+        const newMsg = await build('Message', { text: input.value.trim() });
         broadcast('addMessageToScreen', newMsg);
         input.value = '';
     };
@@ -64,13 +61,13 @@ const Textbox = defineComponent(async ({ whisper, broadcast }) => {
     div.append(input, button);
     return div;
 });
-const Sidebar = defineComponent(async ({ listen }) => {
+define(async function Sidebar({ listen }) {
     const div = document.createElement('div');
     div.className = 'sidebar';
     listen('addConversationToSidebar', (button) => div.append(button));
     return div;
 });
-const SidebarButton = defineComponent(async ({ listen, broadcast }) => {
+define(async function SidebarButton({ listen, broadcast }) {
     const button = document.createElement('button');
     let buttonId = '';
     listen('setSidebarButtonId', (person) => {
@@ -80,8 +77,10 @@ const SidebarButton = defineComponent(async ({ listen, broadcast }) => {
     button.addEventListener('click', () => {
         broadcast('setActiveConversation', buttonId);
     });
+    // const x = await sw.build('Message');
+    // console.log(x);
     return button;
 });
-document.body.append(await App('default'));
+document.body.append(await build('App'));
 //@ts-ignore
-window.x = sw;
+window.sw = sw;
