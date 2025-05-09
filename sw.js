@@ -1,24 +1,11 @@
-// Registers to each topic a map of instances where each instance has a set of callbacks
-// All messages go through this
-const TOPICMAP = new Map();
-// Saves a set of instances created with each factory
-const INSTANCES = {};
-// Store the metadata
 const COMPONENTS = {};
-// Set of components per room
+const TOPICMAP = new Map();
+const INSTANCES = {};
 const ROOMMAP = new Map();
-// Set of active topics per instance
 const LISTENINGMAP = new Map();
-// Component instance ID to the instance
-const IDMAP = new Map();
-// Each instance gets a unique id by increment
-let INSTANCEIDCOUNT = 0;
-// const ECHOMAP: Map<
-//     { room: string; topic: string; },
-//     { data: any, speaker: ComponentInstance, speechType: 'echo' }
-// > = new Map();
-// Allow access to an instance's internals from outside
 const ABILITYMAP = new Map();
+const IDMAP = new Map();
+let INSTANCECOUNT = 0;
 // Listen to a topic and fire a callback when receiving a message
 const LISTEN = (topic, callbackWithMetadata, self) => {
     const listenerCallbackMap = TOPICMAP.get(topic);
@@ -52,6 +39,7 @@ const IGNORE = (topic, self) => {
 };
 // Ignore everything
 const DEAFEN = (self) => {
+    LISTENINGMAP.delete(self);
 };
 // Message the topic in every room
 const BROADCAST = (topic, data, speaker) => {
@@ -142,15 +130,12 @@ const leaveRoom = (room, componentInstance) => {
     componentInstance.dataset.swRoom = '';
 };
 const define = (componentFn) => {
-    if (typeof componentFn !== 'function' || !componentFn.name) {
-        throw new Error(`Component definition must use a named function: async function ComponentName()`);
-    }
-    if (componentFn.constructor.name !== 'AsyncFunction') {
-        throw new Error(`Component definition must be async.`);
+    if (typeof componentFn !== 'function' || !componentFn.name || componentFn.constructor.name !== 'AsyncFunction') {
+        throw new Error(`Component definition must use an async named function: async function ComponentName()`);
     }
     const build = async (props) => {
         let isMounting = true;
-        const instanceId = INSTANCEIDCOUNT++;
+        const instanceId = INSTANCECOUNT++;
         let room = '';
         // We are using a Promise to resolve a circular dependency.
         // In order for the methods like listen() to work, they need the component instance to finish firing and return its value, element.
@@ -219,16 +204,23 @@ const define = (componentFn) => {
             deafen() {
             },
             destroy() {
-                this.deafen();
-                // Delete from maps and null stuff out
+                element.remove();
+                IDMAP.delete(instanceId);
+                LISTENINGMAP.delete(element);
+                ABILITYMAP.delete(element);
+                ROOMMAP.get(room)?.delete(element);
+                INSTANCES[componentFn.name].splice(INSTANCES[componentFn.name].indexOf(metadata), 1);
+                room = null;
+                metadata = null;
+                element = null;
             }
         });
-        const element = await componentFn(abilities, props);
+        let element = await componentFn(abilities, props);
         if (!(element instanceof HTMLElement)) {
             rejectElement();
             throw new Error(`Component definition must return an HTMLElement.`);
         }
-        const metadata = {
+        let metadata = {
             element,
             get room() {
                 return room;
@@ -239,6 +231,7 @@ const define = (componentFn) => {
         };
         INSTANCES[componentFn.name]?.push(metadata);
         element.dataset.swId = String(instanceId);
+        element.dataset.swComponent = componentFn.name;
         IDMAP.set(instanceId, element);
         LISTENINGMAP.set(element, new Set());
         ABILITYMAP.set(element, abilities);
@@ -260,6 +253,7 @@ const getAbilities = (componentInstance) => {
     return ABILITYMAP.get(componentInstance);
 };
 const getInstancesByRoom = (room) => {
+    const roommates = ROOMMAP.get(room);
     const x = {};
     for (const key in INSTANCES) {
         const instances = INSTANCES[key].filter(item => item.room === room);
@@ -274,20 +268,20 @@ const sw = Object.freeze({
         return { ...COMPONENTS };
     },
     define,
-    build(componentName, props) {
+    build(componentName, props = {}) {
         if (typeof COMPONENTS[componentName] !== 'function')
             throw new Error(`Component "${componentName}" isn't defined.`);
         return COMPONENTS[componentName](props);
     },
     find(query) {
         if (!query)
-            return;
+            return [];
         if (typeof query.component === 'undefined' && typeof query.room === 'undefined')
-            return;
+            return [];
         if (typeof query.room === 'undefined')
             return INSTANCES[query.component];
         if (typeof query.component === 'undefined') {
-            return getInstancesByRoom(query.room);
+            return getInstancesByRoom(query.room); // this is returning an object, should return array
         }
         // Return by both here
     },

@@ -1,6 +1,6 @@
-type ComponentDefinition = (abilities: Abilities, props?: Record<string, any>) => Promise<HTMLElement>;
-type Component = (props?: Record<string, any>) => Promise<ComponentInstance>;
 type ComponentInstance = HTMLElement;
+type ComponentDefinition = (abilities: Abilities, props: Record<string, any>) => Promise<ComponentInstance>;
+type Component = (props: Record<string, any>) => Promise<ComponentInstance>;
 type MessageCallback = (data: any, speaker: ComponentInstance, speechType: SpeechType) => any;
 type MessageCallbackWithMetadata = {
     callback: MessageCallback;
@@ -33,37 +33,25 @@ type Abilities = Readonly<{
     echo(topic: string, data: any): void;
     destroy(): void;
     //impersonate(): Abilities;
-    //track(component: ComponentInstance): void;
+    //track/watch(component: ComponentInstance): void;
+    //build() - local build
+    //clone()
+    //bind() -- reactive values
+    // inspect(instance) -- returns metadata
 }>;
 
 type SpeechType = 'whisper' | 'shout' | 'broadcast' | 'echo';
 
 export { ComponentDefinition, Component, ComponentInstance };
 
-// Registers to each topic a map of instances where each instance has a set of callbacks
-// All messages go through this
-const TOPICMAP: Map<string, ListenerCallbackMap> = new Map();
-// Saves a set of instances created with each factory
-const INSTANCES: Record<string, ComponentInstanceWithMetadata[]> = {};
-// Store the metadata
-
 const COMPONENTS: Record<string, Component> = {};
-// Set of components per room
+const TOPICMAP: Map<string, ListenerCallbackMap> = new Map();
+const INSTANCES: Record<string, ComponentInstanceWithMetadata[]> = {};
 const ROOMMAP: Map<string, Set<ComponentInstance>> = new Map();
-// Set of active topics per instance
 const LISTENINGMAP: Map<ComponentInstance, Set<string>> = new Map();
-// Component instance ID to the instance
-const IDMAP: Map<number, ComponentInstance> = new Map();
-// Each instance gets a unique id by increment
-let INSTANCEIDCOUNT = 0;
-
-// const ECHOMAP: Map<
-//     { room: string; topic: string; },
-//     { data: any, speaker: ComponentInstance, speechType: 'echo' }
-// > = new Map();
-
-// Allow access to an instance's internals from outside
 const ABILITYMAP: Map<ComponentInstance, Abilities> = new Map();
+const IDMAP: Map<number, ComponentInstance> = new Map();
+let INSTANCECOUNT = 0;
 
 // Listen to a topic and fire a callback when receiving a message
 const LISTEN = (topic: string, callbackWithMetadata: MessageCallbackWithMetadata, self: ComponentInstance) => {
@@ -103,7 +91,7 @@ const IGNORE = (topic: string, self: ComponentInstance) => {
 
 // Ignore everything
 const DEAFEN = (self: ComponentInstance) => {
-
+    LISTENINGMAP.delete(self);
 };
 
 // Message the topic in every room
@@ -197,15 +185,12 @@ const leaveRoom = (room: string, componentInstance: ComponentInstance) => {
 };
 
 const define = (componentFn: ComponentDefinition) => {
-    if (typeof componentFn !== 'function' || !componentFn.name) {
-        throw new Error(`Component definition must use a named function: async function ComponentName()`);
+    if (typeof componentFn !== 'function' || !componentFn.name || componentFn.constructor.name !== 'AsyncFunction') {
+        throw new Error(`Component definition must use an async named function: async function ComponentName()`);
     }
-    if (componentFn.constructor.name !== 'AsyncFunction') {
-        throw new Error(`Component definition must be async.`);
-    }
-    const build: Component = async (props?: Record<string, any>) => {
+    const build: Component = async (props: Record<string, any>) => {
         let isMounting = true;
-        const instanceId = INSTANCEIDCOUNT++;
+        const instanceId = INSTANCECOUNT++;
         let room = '';
 
         // We are using a Promise to resolve a circular dependency.
@@ -220,7 +205,7 @@ const define = (componentFn: ComponentDefinition) => {
         const { promise: getElement,
             resolve: resolveElement,
             reject: rejectElement
-        } = Promise.withResolvers<HTMLElement>();
+        } = Promise.withResolvers<HTMLElement>(); 
 
         const fire = (fn: (...args: any[]) => any, ...args: any[]) => {
             // Safely fires if the component hasn't mounted yet
@@ -283,18 +268,25 @@ const define = (componentFn: ComponentDefinition) => {
 
             },
             destroy() {
-                this.deafen();
-                // Delete from maps and null stuff out
+                element.remove();
+                IDMAP.delete(instanceId);
+                LISTENINGMAP.delete(element);
+                ABILITYMAP.delete(element);
+                ROOMMAP.get(room)?.delete(element);
+                INSTANCES[componentFn.name].splice(INSTANCES[componentFn.name].indexOf(metadata), 1);
+                room = null as any;
+                metadata = null as any;
+                element = null as any;
             }
         });
 
-        const element = await componentFn(abilities, props);
+        let element = await componentFn(abilities, props);
         if (!(element instanceof HTMLElement)) {
             rejectElement();
             throw new Error(`Component definition must return an HTMLElement.`);
         }
 
-        const metadata: ComponentInstanceWithMetadata = {
+        let metadata: ComponentInstanceWithMetadata = {
             element,
             get room() {
                 return room;
@@ -306,11 +298,11 @@ const define = (componentFn: ComponentDefinition) => {
 
         INSTANCES[componentFn.name]?.push(metadata);
         element.dataset.swId = String(instanceId);
+        element.dataset.swComponent = componentFn.name;
         IDMAP.set(instanceId, element);
         LISTENINGMAP.set(element, new Set());
         ABILITYMAP.set(element, abilities);
         enterRoom(room, element);
-
         resolveElement(element);
 
         isMounting = false;
@@ -333,6 +325,9 @@ const getAbilities = (componentInstance: ComponentInstance) => {
 };
 
 const getInstancesByRoom = (room: string) => {
+    const roommates = ROOMMAP.get(room);
+
+
     const x: any = {};
     for (const key in INSTANCES) {
         const instances = INSTANCES[key].filter(item => item.room === room);
@@ -350,16 +345,16 @@ const sw = Object.freeze({
         return {...COMPONENTS};
     },
     define,
-    build(componentName: string, props?: Record<string, any>) {
+    build(componentName: string, props: Record<string, any> = {}) {
         if (typeof COMPONENTS[componentName] !== 'function') throw new Error(`Component "${componentName}" isn't defined.`);
         return COMPONENTS[componentName](props);
     },
     find(query: { component: string, room: string }) {
-        if (!query) return;
-        if (typeof query.component === 'undefined' && typeof query.room === 'undefined') return;
+        if (!query) return [];
+        if (typeof query.component === 'undefined' && typeof query.room === 'undefined') return [];
         if (typeof query.room === 'undefined') return INSTANCES[query.component];
         if (typeof query.component === 'undefined') {
-            return getInstancesByRoom(query.room);
+            return getInstancesByRoom(query.room); // this is returning an object, should return array
         }
         // Return by both here
     },
